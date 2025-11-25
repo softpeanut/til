@@ -85,32 +85,45 @@ fun fetchData(continuation: Continuation<String>): Any {
 ```kotlin
 // ❌ 잘못된 예
 GlobalScope.launch {
-    // 앱이 종료되어도 계속 실행될 수 있음
-    fetchData()
+    // 서버가 종료되어도 계속 실행될 수 있음
+    processBackgroundJob()
 }
 
 // ✅ 올바른 예
-viewModelScope.launch {
-    // ViewModel 생명주기에 맞춰 자동 취소
-    fetchData()
+class OrderService {
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    
+    fun processOrder(orderId: String) {
+        scope.launch {
+            // scope가 취소되면 자동으로 종료
+            processOrderInternal(orderId)
+        }
+    }
+    
+    fun shutdown() {
+        scope.cancel() // 서비스 종료 시 모든 코루틴 취소
+    }
 }
 ```
 
-### 2. 블로킹 작업을 Main 쓰레드에서 실행
+### 2. 블로킹 작업을 잘못된 Dispatcher에서 실행
 
-UI가 멈추는 원인이 된다.
+쓰레드 풀이 고갈되어 다른 요청이 처리되지 않는다.
 
 ```kotlin
 // ❌ 잘못된 예
-viewModelScope.launch {
-    val data = readFromFile() // 블로킹 I/O
+@GetMapping("/users/{id}")
+suspend fun getUser(@PathVariable id: Long): User {
+    // Dispatchers.Default에서 블로킹 I/O 실행
+    val data = readFromDatabase(id) // 쓰레드 풀 고갈
+    return data
 }
 
 // ✅ 올바른 예
-viewModelScope.launch {
-    val data = withContext(Dispatchers.IO) {
-        readFromFile() // I/O 쓰레드에서 실행
-    }
+@GetMapping("/users/{id}")
+suspend fun getUser(@PathVariable id: Long): User = withContext(Dispatchers.IO) {
+    // I/O 작업은 Dispatchers.IO에서 실행
+    readFromDatabase(id)
 }
 ```
 
@@ -186,31 +199,102 @@ suspend fun loadDashboard() = coroutineScope {
 }
 ```
 
-#### 패턴 2: 순차 실행
+#### 패턴 2: 취소 가능한 작업과 리소스 정리
 
-이전 작업의 결과가 필요한 경우
+코루틴은 suspend 지점에서 취소를 확인하고 리소스를 정리한다
 
 ```kotlin
-suspend fun processOrder(orderId: String) {
-    val order = fetchOrder(orderId)        // 1. 주문 조회
-    val payment = processPayment(order)     // 2. 결제 처리
-    val shipment = createShipment(payment)  // 3. 배송 생성
-    notifyUser(shipment)                    // 4. 사용자 알림
+// ❌ 일반 함수 - 취소 불가능
+fun processLargeFile(filePath: String): Int {
+    var totalBytes = 0
+    File(filePath).inputStream().use { input ->
+        val buffer = ByteArray(8192)
+        while (true) {
+            val bytesRead = input.read(buffer) // 블로킹 - 청크 읽는 동안 멈출 수 없음
+            if (bytesRead == -1) break
+            totalBytes += bytesRead
+            // 취소 불가능 - 쓰레드 강제 종료만 가능
+        }
+    }
+    return totalBytes
+}
+
+// ❌ 코루틴인데 취소 지점이 없음
+suspend fun processLargeFile(filePath: String): Int = withContext(Dispatchers.IO) {
+    var totalBytes = 0
+    File(filePath).inputStream().use { input ->
+        val buffer = ByteArray(8192)
+        while (true) {
+            val bytesRead = input.read(buffer) // 블로킹 - 여전히 취소 불가
+            if (bytesRead == -1) break
+            totalBytes += bytesRead
+        }
+    }
+    totalBytes
+}
+
+// ✅ 코루틴 - 취소 가능
+suspend fun processLargeFile(filePath: String): Int = withContext(Dispatchers.IO) {
+    var totalBytes = 0
+    File(filePath).inputStream().use { input ->
+        val buffer = ByteArray(8192)
+        while (true) {
+            ensureActive() // 청크마다 취소 확인 - 취소되면 CancellationException 발생
+            val bytesRead = input.read(buffer)
+            if (bytesRead == -1) break
+            totalBytes += bytesRead
+        }
+    }
+    totalBytes
+}
+
+// 사용 예시
+class FileService {
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    fun startProcessing(filePath: String): Job {
+        return scope.launch {
+            try {
+                val result = processLargeFile(filePath)
+                println("Processed ${result.size} lines")
+            } catch (e: CancellationException) {
+                println("Processing cancelled - resources cleaned up")
+                throw e // 취소 예외는 반드시 재전파
+            }
+        }
+    }
+    
+    // 5초 후 자동 취소 예시
+    fun startWithTimeout(filePath: String) {
+        scope.launch {
+            val job = launch { processLargeFile(filePath) }
+            delay(5000)
+            job.cancel() // 5초 후 취소 - ensureActive()에서 감지
+        }
+    }
 }
 ```
 
-#### 패턴 3: 타임아웃 처리
+#### 패턴 3: 구조화된 동시성으로 예외 전파
 
-장시간 실행되는 작업에 제한 시간 설정
+하위 코루틴의 예외가 상위로 전파되도록 처리
 
 ```kotlin
-suspend fun fetchWithTimeout() {
-    try {
-        withTimeout(5000) { // 5초 제한
-            fetchData()
-        }
-    } catch (e: TimeoutCancellationException) {
-        println("작업 시간 초과")
+// SupervisorJob: 하나의 자식이 실패해도 다른 자식은 계속 실행
+class NotificationService {
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    
+    suspend fun sendNotifications(userIds: List<String>) = coroutineScope {
+        userIds.map { userId ->
+            async {
+                try {
+                    sendNotification(userId)
+                } catch (e: Exception) {
+                    logger.error("Failed to send notification to $userId", e)
+                    null // 실패해도 다른 알림은 계속 전송
+                }
+            }
+        }.awaitAll()
     }
 }
 ```

@@ -84,32 +84,45 @@ Lifecycle cannot be managed, leading to memory leaks.
 ```kotlin
 // ❌ Bad: GlobalScope
 GlobalScope.launch {
-    // May continue running even after app terminates
-    fetchData()
+    // May continue running even after server terminates
+    processBackgroundJob()
 }
 
-// ✅ Good: Proper scope
-viewModelScope.launch {
-    // Automatically cancelled with ViewModel lifecycle
-    fetchData()
+// ✅ Good: Proper scope management
+class OrderService {
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    
+    fun processOrder(orderId: String) {
+        scope.launch {
+            // Automatically cancelled when scope is cancelled
+            processOrderInternal(orderId)
+        }
+    }
+    
+    fun shutdown() {
+        scope.cancel() // Cancels all coroutines on service shutdown
+    }
 }
 ```
 
-### 2. Blocking Operations on Main Thread
+### 2. Blocking Operations on Wrong Dispatcher
 
-Causes UI to freeze.
+Thread pool gets exhausted and other requests cannot be processed.
 
 ```kotlin
-// ❌ Bad: Blocking I/O on main thread
-viewModelScope.launch {
-    val data = readFromFile() // Blocking I/O
+// ❌ Bad: Blocking I/O on Dispatchers.Default
+@GetMapping("/users/{id}")
+suspend fun getUser(@PathVariable id: Long): User {
+    // Blocking I/O on Dispatchers.Default exhausts thread pool
+    val data = readFromDatabase(id)
+    return data
 }
 
-// ✅ Good: Use appropriate dispatcher
-viewModelScope.launch {
-    val data = withContext(Dispatchers.IO) {
-        readFromFile() // Runs on I/O thread
-    }
+// ✅ Good: Use Dispatchers.IO for I/O operations
+@GetMapping("/users/{id}")
+suspend fun getUser(@PathVariable id: Long): User = withContext(Dispatchers.IO) {
+    // I/O operations run on Dispatchers.IO
+    readFromDatabase(id)
 }
 ```
 
@@ -185,31 +198,102 @@ suspend fun loadDashboard() = coroutineScope {
 }
 ```
 
-#### Pattern 2: Sequential Execution
+#### Pattern 2: Cancellable Operations and Resource Cleanup
 
-When the result of previous operation is needed
+Coroutines check for cancellation at suspension points and clean up resources
 
 ```kotlin
-suspend fun processOrder(orderId: String) {
-    val order = fetchOrder(orderId)        // 1. Fetch order
-    val payment = processPayment(order)     // 2. Process payment
-    val shipment = createShipment(payment)  // 3. Create shipment
-    notifyUser(shipment)                    // 4. Notify user
+// ❌ Regular function - Not cancellable
+fun processLargeFile(filePath: String): Int {
+    var totalBytes = 0
+    File(filePath).inputStream().use { input ->
+        val buffer = ByteArray(8192)
+        while (true) {
+            val bytesRead = input.read(buffer) // Blocking - Cannot stop while reading chunk
+            if (bytesRead == -1) break
+            totalBytes += bytesRead
+            // Cannot be cancelled - Only thread termination possible
+        }
+    }
+    return totalBytes
+}
+
+// ❌ Coroutine but no cancellation points
+suspend fun processLargeFile(filePath: String): Int = withContext(Dispatchers.IO) {
+    var totalBytes = 0
+    File(filePath).inputStream().use { input ->
+        val buffer = ByteArray(8192)
+        while (true) {
+            val bytesRead = input.read(buffer) // Blocking - Still not cancellable
+            if (bytesRead == -1) break
+            totalBytes += bytesRead
+        }
+    }
+    totalBytes
+}
+
+// ✅ Coroutine - Cancellable
+suspend fun processLargeFile(filePath: String): Int = withContext(Dispatchers.IO) {
+    var totalBytes = 0
+    File(filePath).inputStream().use { input ->
+        val buffer = ByteArray(8192)
+        while (true) {
+            ensureActive() // Check cancellation per chunk - Throws CancellationException if cancelled
+            val bytesRead = input.read(buffer)
+            if (bytesRead == -1) break
+            totalBytes += bytesRead
+        }
+    }
+    totalBytes
+} // use block automatically calls close() on cancellation
+
+// Usage example
+class FileService {
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    fun startProcessing(filePath: String): Job {
+        return scope.launch {
+            try {
+                val totalBytes = processLargeFile(filePath)
+                println("Processed $totalBytes bytes")
+            } catch (e: CancellationException) {
+                println("Processing cancelled - resources cleaned up")
+                throw e // Always rethrow CancellationException
+            }
+        }
+    }
+    
+    // Example: Auto-cancel after 5 seconds
+    fun startWithTimeout(filePath: String) {
+        scope.launch {
+            val job = launch { processLargeFile(filePath) }
+            delay(5000)
+            job.cancel() // Cancel after 5 seconds - Detected at ensureActive()
+        }
+    }
 }
 ```
 
-#### Pattern 3: Timeout Handling
+#### Pattern 3: Structured Concurrency for Exception Propagation
 
-Setting time limit for long-running operations
+Handle exceptions so that child coroutine failures propagate to parent
 
 ```kotlin
-suspend fun fetchWithTimeout() {
-    try {
-        withTimeout(5000) { // 5 second limit
-            fetchData()
-        }
-    } catch (e: TimeoutCancellationException) {
-        println("Operation timed out")
+// SupervisorJob: Other children continue even if one child fails
+class NotificationService {
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    
+    suspend fun sendNotifications(userIds: List<String>) = coroutineScope {
+        userIds.map { userId ->
+            async {
+                try {
+                    sendNotification(userId)
+                } catch (e: Exception) {
+                    logger.error("Failed to send notification to $userId", e)
+                    null // Other notifications continue even on failure
+                }
+            }
+        }.awaitAll()
     }
 }
 ```
