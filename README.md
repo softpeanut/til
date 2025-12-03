@@ -21,6 +21,7 @@
 
 #### Kotlin
 - [Coroutine](./kr/Language/Kotlin/Coroutine.md)
+- [Coroutine vs Thread vs Virtual Thread](./kr/Language/Kotlin/Coroutine%20vs%20Thread%20vs%20Virtual%20Thread.md)
 
 ### Computer Science
 
