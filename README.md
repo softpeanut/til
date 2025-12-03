@@ -52,12 +52,14 @@
 - [디자인 패턴이란?](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/What%20is%20Design%20Pattern.md)
 
 ##### Creational
-- [Factory Method](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Creational/Factory%20Method.md)
-- [Abstract Factory](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Creational/Abstract%20Factory.md)
+- [Factory Method Pattern](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Creational/Factory%20Method.md)
+- [Abstract Factory Pattern](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Creational/Abstract%20Factory.md)
+- [Singleton Pattern](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Creational/Singleton%20Pattern.md)
 
 ##### Structural
 - [Composite Pattern](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Structural/Composite%20Pattern.md)
 - [Decorator Pattern](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Structural/Decorator%20Pattern.md)
+- [Facade Pattern](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Structural/Facade%20Pattern.md)
 
 ##### Behavioral
 - [Strategy Pattern](./kr/Software%20Design%20Methodology/Object-Oriented%20Programming/GoF%20Design%20Pattern/Behavioral/Strategy%20Pattern.md)
